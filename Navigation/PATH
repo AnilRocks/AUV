@@ -1,0 +1,3 @@
+#NavSti "/home/ubuntu/AUV/Navigation/Nav.txt"
+NavStik "/dev/ttyACM0"
+Arduino "/dev/ttyACM0"

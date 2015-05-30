@@ -1,0 +1,308 @@
+#!/bin/bash
+
+#f/b/l/r (pwm)				forward/backward/left/right (pwm optional)
+#s or stop				stops the sub
+#lm/rm pwm/s (rm/lm pwm/s)		left/right motor rotate with pwm given (s for stop) both motor can also simultaneously controlled
+#lt/rt (-c) ((d/r)angle) (pwm)		left/right turn specific angle d5 for 5degree r2 for 2radians (pwm optional)
+#					sub stops after completion of command if -c not given
+#led (on/off/t or toggle)		turn led on/off or toggle, not specifying command will toggle the led
+#torpedo (fire/back)                    fire/take back torpedo (no parameter fires the torpedo)
+
+pwm=80		#default pwm
+stop="s"	#command for stop
+
+processes="/home/ubuntu/AUV/Navigation/processes"
+path="/home/ubuntu/AUV/Navigation/PATH"
+
+pi=3.1416
+pi2=6.2832
+error=1
+err_nav=0
+
+if ! [ -e $processes ] ; then
+	touch $processes
+fi
+
+if ! [ -e $path ] ; then
+	touch $path
+fi
+
+Arduino=$(grep "Arduino" < $path | cut -d'"' -f2)
+if ! ps | grep -q -f <(grep "Arduino" < $processes | cut -d'-' -f2) ; then
+	echo "Arduino not initialised!"
+	exit ;
+fi
+
+NavStik=$(grep "NavStik" < $path | cut -d'"' -f2)
+if [ -e $NavStik ] ; then
+	if ! cat $NavStik | grep -q "NAVSTIK" ; then
+		err_nav=1
+	fi
+else
+	err_nav=1
+fi
+
+inrange()
+{
+	local val=0
+	for i in $@ ; do
+		if [ "$i" == "$stop" ] || [ "$i" == "stop" ] ; then
+			val=$[ $val + 1 ]
+		elif [ $i -lt 256 ] && [ $i -gt -256 ] ; then
+			val=$[ $val + 1 ]
+		fi
+	done
+	echo $val
+}
+
+tochar()
+{
+	printf "\x$(printf "%x" $1)"
+}
+
+thrust()
+{
+	local cmd
+
+	case $1 in
+	"lm")
+		cmd="L"
+	;;
+	"rm")
+		cmd="R"
+	;;
+	esac
+
+	if [ "$2" == "$stop" ] || [ "$2" == "stop" ] || [ $2 -eq 0 ] ; then
+		echo -n "$cmd""s0" > $Arduino
+        elif [ $2 -lt 256 ] && [ $2 -gt 0 ] ; then
+                echo -n "$cmd""f$(tochar $2)" > $Arduino
+	elif [ $2 -gt -256 ] && [ $2 -lt 0 ] ; then
+                local spd=$[ $2 * -1 ]
+               	echo -n "$cmd""b$(tochar $spd)" > $Arduino
+	fi
+}
+
+valid_cmd()
+{
+	local val="$1$2"
+	if [ "$val" == "lmrm" ] || [ "$val" == "rmlm" ] ; then
+		echo 1
+	else
+		echo 0
+	fi
+}
+
+if [ "$1" == "lm" ] || [ "$1" == "rm" ] ; then
+        if [ $# -eq 2 ] && [ $(inrange $2) -eq 1 ] ; then
+		thrust $1 $2
+		error=0
+	fi
+	if [ $# -eq 4 ] && [ $(valid_cmd $1 $3) -eq 1 ] && [ $(inrange $2 $4) -eq 2 ] ; then
+		thrust $1 $2
+		thrust $3 $4
+		error=0
+	fi
+fi
+
+if [ "$1" == "$stop" ] || [ "$1" == "stop" ] ; then
+        if [ $# -eq 1 ] ; then
+                thrust "rm" "$stop"
+		thrust "lm" "$stop"
+        	error=0
+	fi
+fi
+
+if [ "$1" == "f" ] ; then
+	if [ $# -eq 1 ] ; then
+		thrust "rm" "$pwm"
+		thrust "lm" "$pwm"
+		error=0
+	elif [ $# -eq 2 ] && [ $(inrange $2) -eq 1 ] ; then
+		thrust "rm" "$2"
+		thrust "lm" "$2"
+		error=0
+	fi
+fi
+
+if [ "$1" == "b" ] ; then
+	if [ $# -eq 1 ] ; then
+	        thrust "rm" "$[ -1 * $pwm ]"
+                thrust "lm" "$[ -1 * $pwm ]"
+                error=0
+        elif [ $# -eq 2 ] && [ $(inrange $2) -eq 1 ] ; then
+                if [ "$2" == "$stop" ] || [ "$2" == "stop" ] ; then
+			thrust "rm" "$stop"
+	                thrust "lm" "$stop"
+        	else
+			thrust "rm" "$[ -1 * $2 ]"
+	                thrust "lm" "$[	-1 * $2 ]"
+		fi
+		error=0
+	fi
+fi
+
+if [ "$1" == "l" ] ; then
+	if [ $# -eq 1 ] ; then
+	        thrust "rm" "$[ -1 * $pwm ]"
+                thrust "lm" "$pwm"
+                error=0
+        elif [ $# -eq 2 ] && [ "$2" != "$stop" ] && [ "$2" != "stop" ] && [ $(inrange $2) -eq 1 ] ; then
+		thrust "rm" "$[ -1 * $2 ]"
+                thrust "lm" "$2"
+		error=0
+	fi
+fi
+
+if [ "$1" == "r" ] ; then
+	if [ $# -eq 1 ] ; then
+	        thrust "lm" "$[ -1 * $pwm ]"
+                thrust "rm" "$pwm"
+                error=0
+        elif [ $# -eq 2 ] && [ "$2" != "$stop" ] && [ "$2" == "stop" ] && [ $(inrange $2) -eq 1 ] ; then
+		thrust "lm" "$[ -1 * $2 ]"
+                thrust "rm" "$2"
+		error=0
+	fi
+fi
+
+turn()
+{
+	while read line ; do
+	if [[ $line =~ "NAVSTIK2" ]]; then
+		init_value="${line:29:7}"
+		break
+	fi
+	done < $NavStik
+
+	thrust "lm" "$2"
+	thrust "rm" "$[ -1 * $2 ]"
+
+	while read line ; do
+	if [[ $line =~ "NAVSTIK2" ]]; then
+		value="${line:29:7}" ;
+		diff="$(bc <<< "scale=4; $init_value - $value")"
+		diff="${diff//-}"
+		[[ $[ $(bc <<< "$diff > $1") + $(bc <<< "$diff < $(bc <<< "scale=4 ; $pi2 - $1")") ] -eq 2 ]] && break
+	fi
+	done < $NavStik
+
+}
+
+valid_angle()
+{
+	if [ "${1:0:1}" == "r" ] ; then
+		angle=${1:1}
+	else
+		if [ "${1:0:1}" == "d" ] ; then
+			angle=${1:1}
+		else
+			angle=$1
+		fi
+		angle=$(bc <<< "scale=5; $angle/180")
+		angle=$(bc <<< "scale=4; $angle*$pi")
+	fi
+
+	if [ $(bc <<< "$angle >= -$pi2") -eq 1 ] && [ $(bc <<< "$angle <= $pi2") -eq 1 ] ; then
+		echo $angle
+	else
+		echo "X"
+	fi
+}
+
+if [ "$1" == "lt" ] && [ $err_nav -eq 0 ]  ; then
+	cont=0
+
+	if [ "$2" == "-c" ] ; then
+		cont=1
+		shift
+	fi
+
+	[ "$#" -eq 1 ] && angle="-$pi2" || angle=$(valid_angle $2)
+
+
+	if [ $# -eq 1 ] ; then
+		turn "-$pi2" $pwm
+		angle="-$pi2"
+		error=0
+	elif [ $# -eq 2 ] && [ "$angle" != "X" ] ; then
+		turn $(bc <<< "-1 * $angle") $pwm
+		error=0
+        elif [ $# -eq 3 ] && [ "$angle" != "X" ] && [ $(inrange $3) -eq 1 ] ; then
+                if [ "$2" != "$stop" ] && [ "$2" != "stop" ] ; then
+			turn $(bc <<< "-1 * $angle") $3
+			error=0
+		fi
+	fi
+
+	if [ $cont -eq 0 ] && [ $error -eq 0 ] ; then
+		thrust "rm" "$stop"
+		thrust "lm" "$stop"
+	fi
+elif [ "$1" == "lt" ] && [ $err_nav -eq 1 ] ; then
+	echo "NavStik not initialised!"
+	error=0
+fi
+
+if [ "$1" == "rt" ] && [ $err_nav -eq 0 ]  ; then
+	cont=0
+
+	if [ "$2" == "-c" ] ; then
+		cont=1
+		shift
+	fi
+
+	[ "$#" -eq 1 ] && angle="$pi2" || angle=$(valid_angle $2)
+
+	if [ $# -eq 1 ] ; then
+		turn "$pi2" $pwm
+		angle="$pi2"
+		error=0
+	elif [ $# -eq 2 ] && [ "$angle" != "X" ] ; then
+		turn $angle $pwm
+		error=0
+        elif [ $# -eq 3 ] && [ "$angle" != "X" ] && [ $(inrange $3) -eq 1 ] ; then
+                if [ "$2" != "$stop" ] && [ "$2" != "stop" ] ; then
+			turn $angle $3
+			error=0
+		fi
+	fi
+
+	if [ $cont -eq 0 ] && [ $error -eq 0 ] ; then
+		thrust "rm" "$stop"
+		thrust "lm" "$stop"
+	fi
+elif [ "$1" == "rt" ] && [ $err_nav -eq 1 ] ; then
+	echo "NavStik not initialised!"
+	error=0
+fi
+
+if [ "$1" == "led" ] ; then
+	error=0
+	if [ $# -eq 1 ] ; then
+		echo -n "G2" > $Arduino
+	elif [ "$2" == "on" ] ; then
+		echo -n "G1" > $Arduino
+	elif [ "$2" == "off" ] ; then
+		echo -n "G0" > $Arduino
+	elif [ "$2" == "t" ] || [ "$2" == "toggle" ] ; then
+		echo -n "G2" > $Arduino
+	else
+		error=1
+	fi
+fi
+
+if [ "$1" == "torpedo" ] ; then
+	error=0
+	if [ $# -eq 1 ] || [ "$2" == "fire" ] ; then
+		echo -n "Tf1" > $Arduino
+	elif [ "$2" == "back" ] ; then
+		echo -n "Tb1" > $Arduino
+	else
+		error=1
+	fi
+fi
+
+if [ $error -eq 1 ] ; then
+	echo "Incorrect Command!"
+fi
